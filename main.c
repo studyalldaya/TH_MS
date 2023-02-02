@@ -3,6 +3,7 @@
 #include "lv_drivers/display/fbdev.h"
 #include "lv_drivers/indev/evdev.h"
 #include <unistd.h>
+#include <stdio.h>
 #include <pthread.h>
 #include <time.h>
 #include <sys/time.h>
@@ -11,17 +12,21 @@
 
 #define DISP_BUF_SIZE (1024 * 600)
 
-void chart_update()
+int chart_update()
 {
     unsigned char humi, temp;
-    dht11_get_data(&humi, &temp);
+    if (dht11_get_data(&humi, &temp))
+    {
+        return -1;
+    }
     lv_slider_set_value(ui_tempSlider, temp, LV_ANIM_OFF);
     lv_slider_set_value(ui_humiSlider, humi, LV_ANIM_OFF);
 
     lv_chart_set_next_value(ui_Chart, temp_point, temp);
     lv_chart_set_next_value(ui_Chart, humi_point, humi);
     lv_chart_refresh(ui_Chart);
-    sleep(1);
+
+    return 0;
 }
 
 int main(void)
@@ -67,13 +72,22 @@ int main(void)
     // lv_demo_widgets();
     ui_init();
 
+    // 忽略第一次的数据，因为每次运行程序，第一次获得的都是上一次最后获得的数据。
+    if (dht11_oneshoot())
+        return -1;
+
     /*Handle LitlevGL tasks (tickless mode)*/
     while (1)
     {
-        chart_update();
+        sleep(1);
+        if (chart_update())
+        {
+            printf("dht11 err!\n=======progress exit! =======\n");
+            return -1;
+        }
 
         lv_timer_handler();
-        usleep(5000);
+        // usleep(5000);
     }
 
     return 0;

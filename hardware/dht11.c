@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -8,7 +9,7 @@
 int dht11_get_data(unsigned char *humi, unsigned char *temp)
 {
     int fd;
-    unsigned char data[4];
+    unsigned char data[4] = {0};
     fd = open("/dev/100ask_dht11", O_RDWR);
     if (fd == -1)
     {
@@ -31,6 +32,15 @@ int dht11_get_data(unsigned char *humi, unsigned char *temp)
         close(fd);
         return -1;
     }
+
     close(fd);
+    return 0;
+}
+
+int dht11_oneshoot()
+{
+    unsigned char bad_humi, bad_temp;
+    if (dht11_get_data(&bad_humi, &bad_humi))
+        return -1;
     return 0;
 }

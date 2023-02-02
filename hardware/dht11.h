@@ -7,6 +7,7 @@ extern "C"
 #endif
 
     int dht11_get_data(unsigned char *humi, unsigned char *temp);
+    int dht11_oneshoot();
 
 #ifdef __cplusplus
 }

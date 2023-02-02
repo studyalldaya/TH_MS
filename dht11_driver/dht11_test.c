@@ -34,7 +34,7 @@ int main(int argc, char *argv[])
         {
             printf("get humidity/temperature: -1\n");
         }
-        sleep(3);
+        sleep(1);
     }
     close(fd);
 

@@ -1,4 +1,4 @@
-﻿
+
 #include <linux/module.h>
 #include <linux/poll.h>
 #include <linux/fs.h>
@@ -29,279 +29,307 @@
 #include <linux/wait.h>
 #include <linux/delay.h>
 
-/* 主设备号 																*/
-static int major;
+#define DRIVER_NAME 			"100ask_dht11"
 
-static struct class *dht11_class;
-static struct gpio_desc *dht11_wait_cond_pin;
-static int irq;
 
-static int dht11_wait_cond = 0;
-static u64 dht11_edge_time[100];
-static int dht11_edge_irq_cnt = 0;
+struct dht11_dev {
+	dev_t			devid;
+	struct cdev cdev;
+	int 			major;
+	struct class * class ;
+	struct platform_device * pdev;
+	struct gpio_desc * dht11_data_pin;
+};
 
-// static u64 dht11_wait_cond_ns = 0;
-static DECLARE_WAIT_QUEUE_HEAD(dht11_waitqueue);
+//static DECLARE_WAIT_QUEUE_HEAD(dht11_waitqueue);
 
-static void dht11_reset(void)
+static void dht11_reset(struct dht11_dev* dev)
 {
-    gpiod_direction_output(dht11_wait_cond_pin, 1);
+    gpiod_direction_output(dev->dht11_data_pin, 1);
+
 }
 
-static void dht11_start(void)
+static void dht11_start(struct dht11_dev* dev)
 {
-    gpiod_direction_output(dht11_wait_cond_pin, 1);
-    udelay(2);
-    gpiod_set_value(dht11_wait_cond_pin, 0);
+    gpiod_direction_output(dev->dht11_data_pin, 1);
+	udelay(2);
+    gpiod_set_value(dev->dht11_data_pin, 0);
     mdelay(18);
-    gpiod_set_value(dht11_wait_cond_pin, 1);
+    gpiod_set_value(dev->dht11_data_pin, 1);
     udelay(40);
-    gpiod_direction_input(dht11_wait_cond_pin);
+    gpiod_direction_input(dev->dht11_data_pin);
 }
 
-static int wait_for_low(int timeout_us)
+static int wait_for_low(struct dht11_dev* dev,int timeout_us)
 {
-    while (gpiod_get_value(dht11_wait_cond_pin) && timeout_us)
-    {
+    while (gpiod_get_value(dev->dht11_data_pin) && timeout_us) {
         timeout_us--;
         udelay(1);
     }
 
-    if (!timeout_us)
-    {
-        return 1;
+    if (!timeout_us) {
+        return -1;
     }
 
     return 0;
 }
 
-static int wait_for_high(int timeout_us)
+static int wait_for_high(struct dht11_dev* dev,int timeout_us)
 {
-    while (!gpiod_get_value(dht11_wait_cond_pin) && timeout_us)
-    {
+    while (!gpiod_get_value(dev->dht11_data_pin) && timeout_us) {
         timeout_us--;
         udelay(1);
     }
 
-    if (!timeout_us)
-    {
-        return 1;
+    if (!timeout_us) {
+        return -1;
     }
 
     return 0;
 }
 
-static int dht11_wait_for_ready(void)
+static int dht11_wait_for_ready(struct dht11_dev* dev)
 {
     /* 等待低电平 */
-    if (wait_for_low(200))
-        return 1;
+    if (wait_for_low(dev,200))
+        return -1;
 
     /* 等待高电平 */
-    if (wait_for_high(200))
-        return 1;
+    if (wait_for_high(dev,200))
+        return -1;
 
     /* 高电平来了 */
     /* 等待低电平 */
-    if (wait_for_low(200))
-        return 1;
+    if (wait_for_low(dev,200))
+        return -1;
 
     return 0;
 }
 
-static int dht11_data_parse(char *data)
+static int dht11_read_byte(struct dht11_dev* dev,unsigned char * buf)
 {
-    int i, j, m = 0;
-    int offset = 0;
+	int i;
+    unsigned char data = 0;
 
-    for (offset = 0; offset <= 2; offset++)
-    {
-        m = offset;
-        for (i = 0; i < 5; i++)
-        {
-            data[i] = 0;
-            for (j = 0; j < 8; j++)
-            {
-                data[i] = data[i] << 1;
-                if (dht11_edge_time[m + 1] - dht11_edge_time[m] >= 40000)
-                {
-                    data[i] = data[i] | 1;
-                }
-
-                m = m + 2;
-            }
+    for(i = 0; i < 8; i++) {
+        /* 等待高电平 */
+        if (wait_for_high(dev,200))
+            return -1;
+		
+        udelay(40);
+        if (gpiod_get_value(dev->dht11_data_pin)) {
+            //get bit 1
+            data        = (data << 1) | 1;
+			//！！！等待高电平结束！ 等待低电平
+			if(wait_for_low(dev,400))
+				return -1;
+			
         }
-
-        // 根据校验码验证数据
-        if (data[4] == (data[0] + data[1] + data[2] + data[3]))
-            return 0;
+        else {
+            //get bit 0
+            data        = (data << 1) | 0;
+        }
     }
-
-    printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
-    return 1;
+	*buf = data;
+    return 0;
 }
 
-static irqreturn_t dht11_isr(int irq, void *dev_id)
-{
-    printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
-    dht11_edge_time[dht11_edge_irq_cnt] = ktime_get_ns();
-    dht11_edge_irq_cnt++;
-    if (dht11_edge_irq_cnt >= 82)
-    { /* 40*2 +1+1 最多82个中断(加上回应信号的两个) */
-        dht11_wait_cond = 1;
-        wake_up(&dht11_waitqueue);
-    }
 
-    return IRQ_HANDLED;
+static int dht11_drv_open(struct inode * inode, struct file * file)
+{
+	//在fops中找到设备
+	struct dht11_dev * my_dht11;
+	my_dht11		= container_of(inode->i_cdev, struct dht11_dev, cdev);
+	file->private_data = my_dht11;
+	return 0;
+}
+static int dht11_drv_release (struct inode *inode, struct file *file)
+{
+	if(file->private_data != NULL)
+		file->private_data = NULL;
+
+	return 0;
 }
 
-/* 实现对应的open/read/write等函数，填入file_operations结构体 					*/
-static ssize_t dht11_drv_read(struct file *file, char __user *buf, size_t size, loff_t *offset)
-{
-    printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
-    unsigned char data[5];
-    int irq_ret;
-    int timeout;
+static ssize_t dht11_drv_read (struct file *file, char __user *buf, size_t size, loff_t *offset)
+{	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+    unsigned long flags;
+    unsigned char data[5] = {0};
+	int i;
+	
+	struct dht11_dev * my_dht11;
+	my_dht11 = (struct dht11_dev*)file->private_data;
 
-    if (size != 4)
-        return -EINVAL;
+	if(size != 4)
+		return -EINVAL;
 
-    // 1.启动dht11
-    dht11_start();
+    local_irq_save(flags);                          //关闭中断
 
-    // 请求中断
-    irq_ret = request_irq(irq, dht11_isr, IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING, "dht11", NULL);
-    if (irq_ret)
-    {
-        printk(KERN_ERR "request_irq error!\n");
-        return -EAGAIN;
-    }
+    //1.发送高脉冲启动dht11
+    dht11_start(my_dht11);
 
-#if 0
-
-    //2.等待dht11就绪,等待回应
-    if (dht11_wait_for_ready()) {
+    //2.等待dht11就绪
+    if (dht11_wait_for_ready(my_dht11)) {
+        local_irq_restore(flags);
         return - EAGAIN;
     }
 
-#endif
-
-    // 每次请求之前清零
-    dht11_edge_irq_cnt = 0;
-
-    timeout = wait_event_timeout(dht11_waitqueue, dht11_wait_cond, HZ); /*超时有可能是81个或者80个，所
-        以return错误*/
-#if 0
-    if (!wait_event_timeout(dht11_waitqueue, dht11_wait_cond, HZ)) {
-        free_irq(irq, NULL);
-        dht11_reset();
-        return - ETIMEDOUT;
+    //3.读5字节数据
+    
+    for (i = 0; i < 5; i++) {
+        if (dht11_read_byte(my_dht11,&data[i])) {
+            local_irq_restore(flags);
+            return - EAGAIN;
+        }
     }
+	dht11_reset(my_dht11);
+    local_irq_restore(flags);                       //恢复中断
 
-#endif
-
-    free_irq(irq, NULL);
-    dht11_reset();
-    if (dht11_data_parse(data))
-    {
-        return -EAGAIN;
-    }
-
-    dht11_wait_cond = 0;
-
-    // 5.返回值 copy to user
-
+    //4.根据校验码验证数据
+	if(data[4] != (data[0]+data[1]+data[2]+data[3]))
+		return -1;
+	
+    //5.返回值 copy to user
     /* data[0] data[1] : 湿度*/
-    /* data[2] data[3] : 温度*/
-    if (copy_to_user(buf, data, 4))
-        return -EFAULT;
+	/* data[2] data[3] : 温度*/
+	if(copy_to_user(buf , data , 4))
+		return -EFAULT;
 
     return 4;
+	
+
 }
 
-/* 定义自己的file_operations结构体												*/
+
+static
+
+
 struct file_operations dht11_fops = {
-    .owner = THIS_MODULE,
-    .read = dht11_drv_read,
+	.owner = THIS_MODULE, 
+	.open = dht11_drv_open, 
+	.release = dht11_drv_release,
+	.read = dht11_drv_read, 
 };
 
-static int dht11_probe(struct platform_device *pdev)
+
+static int dht11_probe(struct platform_device * pdev)
 {
-    // int     irq_ret;
-    printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	int 			i;
+	struct dht11_dev * my_dht11;
 
-    /*1.获取硬件信息 ，可以记录下来     */
-    dht11_wait_cond_pin = devm_gpiod_get(&pdev->dev, "dht11", GPIOD_ASIS);
-    if (IS_ERR(dht11_wait_cond_pin))
-    {
-        dev_err(&pdev->dev, "failed to get dht11_wait_cond_pin\n");
-        return PTR_ERR(dht11_wait_cond_pin);
+	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	my_dht11		= devm_kzalloc(&pdev->dev, sizeof(*my_dht11), GFP_KERNEL);
+
+	if (!my_dht11)
+		return - ENOMEM;
+
+	my_dht11->dht11_data_pin = devm_gpiod_get(&pdev->dev, "dht11", GPIOD_ASIS);
+    if (IS_ERR(my_dht11->dht11_data_pin)) {
+        dev_err(&pdev->dev, "failed to get dht11_data_pin\n");
+        return PTR_ERR(my_dht11->dht11_data_pin);
     }
+	
+	my_dht11->pdev	= pdev;
+	platform_set_drvdata(pdev, my_dht11);
 
-    irq = gpiod_to_irq(dht11_wait_cond_pin);
+	if (my_dht11->major) {
+		my_dht11->devid = MKDEV(my_dht11->major, 0);
+		register_chrdev_region(my_dht11->devid, 1, DRIVER_NAME);
+	}
+	else {
+		alloc_chrdev_region(&my_dht11->devid, 0, 1, DRIVER_NAME);
+		my_dht11->major = MAJOR(my_dht11->devid);
+	}
 
-    // 2.device_create
-    major = register_chrdev(0, "100ask_dht11", &dht11_fops);
-    dht11_class = class_create(THIS_MODULE, "100ask_dht11_class");
-    if (IS_ERR(dht11_class))
-    {
-        unregister_chrdev(major, "100ask_dht11");
-        return PTR_ERR(dht11_class);
-    }
+	cdev_init(&my_dht11->cdev, &dht11_fops);
+	cdev_add(&my_dht11->cdev, my_dht11->devid, 1);
 
-    device_create(dht11_class, NULL, MKDEV(major, 0), NULL, "100ask_dht11"); // 对于多个节点，每次调用probe都创建设备。
-    return 0;
+
+	my_dht11->class = class_create(THIS_MODULE, DRIVER_NAME);
+	if (IS_ERR(my_dht11->class)) {
+		cdev_del(&my_dht11->cdev);
+		unregister_chrdev_region(my_dht11->devid, 1);
+		return PTR_ERR(my_dht11->class);
+	}
+
+	device_create(my_dht11->class, NULL, my_dht11->devid, NULL, DRIVER_NAME); 
+
+	return 0;
 }
 
-static int dht11_remove(struct platform_device *pdev)
+
+static int dht11_remove(struct platform_device * pdev)
 {
-    device_destroy(dht11_class, MKDEV(major, 0));
-    class_destroy(dht11_class);
-    unregister_chrdev(major, "100ask_dht11");
-    return 0;
+
+	struct dht11_dev * my_dht11 = platform_get_drvdata(pdev);
+	
+	platform_set_drvdata(pdev, NULL);
+	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	
+	device_destroy(my_dht11->class, my_dht11->devid);
+	class_destroy(my_dht11->class);
+	cdev_del(&my_dht11->cdev);
+	unregister_chrdev_region(my_dht11->devid, 1);
+
+	return 0;
 }
+
 
 static const struct of_device_id ask100_dht11[] =
-    {
-        {.compatible = "100ask,dht11"},
-        {},
+{
+	{
+		.compatible 	= "100ask,dht11"
+	},
+	{
+	},
 
-        // 必须空一个，内核才能知道到了结尾！
+	//必须空一个，内核才能知道到了结尾！
 };
+
 
 /* 1. 定义platform_driver */
 static
 
-    struct platform_driver dht11_driver = {
-        .probe = dht11_probe,
-        .remove = dht11_remove,
-        .driver = {
-            .name = "100ask_dht11",
-            .of_match_table = ask100_dht11,
-        },
+
+struct platform_driver dht11_driver = {
+	.probe = dht11_probe, 
+	.remove = dht11_remove, 
+	.driver = {
+		.name			= DRIVER_NAME, 
+		.of_match_table = ask100_dht11, 
+	},
+
+
 };
+
 
 /* 2. 在入口函数注册platform_driver */
 static int __init dht11_init(void)
 {
-    int err;
+	int 			err;
 
-    printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
-    err = platform_driver_register(&dht11_driver);
-    return err;
+	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	err 			= platform_driver_register(&dht11_driver);
+	return err;
 }
 
+
 /* 3. 有入口函数就应该有出口函数：卸载驱动程序时，就会去调用这个出��
-    �函数
+	�函数
  *		 卸载platform_driver
  */
 static void __exit dht11_exit(void)
 {
-    printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
-    platform_driver_unregister(&dht11_driver);
+	printk("%s %s line %d\n", __FILE__, __FUNCTION__, __LINE__);
+	platform_driver_unregister(&dht11_driver);
 }
+
 
 /* 7. 其他完善：提供设备信息，自动创建设备节点										 */
 module_init(dht11_init);
 module_exit(dht11_exit);
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Long");
+
+
+
